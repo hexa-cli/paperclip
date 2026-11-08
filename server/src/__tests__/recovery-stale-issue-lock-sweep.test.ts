@@ -8,6 +8,7 @@ import {
   subscribeDatabaseWork,
   costEvents,
   activityLog,
+  agentWakeupRequests,
   agents,
   companies,
   completionContracts,
@@ -65,6 +66,7 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
     await db.delete(heartbeatRuns);
     await db.delete(completionContracts);
     await db.delete(issues);
+    await db.delete(agentWakeupRequests);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -118,6 +120,22 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
 
     return { companyId, agentId, failedRunId, runningRunId };
   }
+
+  it("promotes deferred messages when a stale lock is released", async () => {
+    const { companyId, agentId, failedRunId } = await seed();
+    const issueId = randomUUID();
+    await db.insert(issues).values({ id: issueId, companyId, title: "Deferred message lock", status: "in_progress",
+      priority: "high", assigneeAgentId: agentId, checkoutRunId: failedRunId, executionRunId: failedRunId });
+    const [saved] = await db.insert(agentWakeupRequests).values({ companyId, agentId, source: "automation",
+      status: "deferred_issue_execution", requestedByActorType: "user", updatedAt: new Date(),
+      payload: { issueId, executionWait: { reason: "company.inactive", trigger: "pause_lifted" } } }).returning();
+
+    const result = await recoveryService(db, { enqueueWakeup: vi.fn() }).sweepStaleIssueLocks({ companyId, issueId });
+    expect(result.issueIds).toEqual([issueId]);
+    const [promoted] = await db.select({ updatedAt: agentWakeupRequests.updatedAt }).from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, saved.id));
+    expect(promoted.updatedAt.getTime()).toBeLessThanOrEqual(Date.now() - 29_000);
+  });
 
   it.each([true, false])("preserves explicit retry ownership when finalization wins the sweep write (settler: %s)", async withSettler => {
     const { companyId, agentId, runningRunId, failedRunId } = await seed();
