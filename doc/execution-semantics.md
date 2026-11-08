@@ -1828,6 +1828,8 @@ Automatic retries that can continue source work use the agent's configured model
 
 Deploys and restarts routinely separate saving run state from resuming it. Saved launch configuration, provider and runner pack identity, leases and listeners, session or checkpoint schema, and workspace authority must either carry forward to the next release or be refused with a permanent, named error code. Recovery does not retry that refusal or replace the saved state over it, and it is never reported as a generic retryable interruption such as `native_session_interrupted`. See [`rules/upgrade-safe-run-state.mdc`](../rules/upgrade-safe-run-state.mdc).
 
+Native Runner process reuse uses a versioned process-configuration key. A checkpoint from the prior key version keeps its saved session state but cold-restores the Runner once; the next checkpoint records the new key. The key includes a session-scoped HMAC of configured provider credentials, never their raw values. A requested tool refresh always starts a fresh process. A managed GitHub broker token supplied to each run's `prepare` does not prevent reuse; a legacy broker token placed in the process environment does.
+
 ## 10. Startup and Periodic Reconciliation
 
 Startup recovery and periodic recovery are different from normal wakeup delivery.
