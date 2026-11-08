@@ -104,12 +104,7 @@ import {
 import { visibleIssueCondition } from "../issue-visibility.js";
 import { forbidden, notFound } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
-import {
-  isPidAlive,
-  isProcessGroupAlive,
-} from "../local-service-supervisor.js";
-import { sameProcessSpace } from "../controller-process-identity.js";
-import { ephemeralServerEnabled } from "../ephemeral-server-mode.js";
+import { proveRunProcessGone } from "../run-process-owner.js";
 import { LEGACY_HOST_FALLBACK_EVENT } from "../native-runtime/native-restart-recovery.js";
 import { redactSensitiveText } from "../../redaction.js";
 import { isUniqueViolation } from "../../db-errors.js";
@@ -926,6 +921,7 @@ export function recoveryService(
       run: typeof heartbeatRuns.$inferSelect,
     ) => boolean;
     liveRunExecutions?: Readonly<{ has(id: string): boolean }>;
+    settleLostRunProcess?: (scope: { companyId: string; runId: string; onDeferredDeadline?: (at: number) => void }) => Promise<unknown>;
     beforeOrphanedRunTerminalWrite?: (runId: string) => Promise<void>;
     beforeStaleLockClear?: (issueId: string) => Promise<void>;
   },
@@ -6094,9 +6090,6 @@ export function recoveryService(
   //   authority that catches the reuse-lease path: the release stops the sandbox
   //   but keeps the server process alive, so the in-memory handle and the
   //   recorded pid can both persist.
-  // - Process-death authority: the run has no in-memory handle and its recorded
-  //   process and process group are both gone. This catches a hard server crash
-  //   that skipped the graceful teardown, even when the issue is not terminal.
   async function terminalizeOrphanedRunningRun(
     run: typeof heartbeatRuns.$inferSelect,
     options?: {
@@ -6182,24 +6175,22 @@ export function recoveryService(
     // group. Require recorded process metadata, so this authority never fires
     // on a run that has not yet stored its pid.
     let processGone = false;
+    let legacyHostFallback = false;
     const hasLiveExecution =
       deps.liveRunExecutions?.has(run.id) ?? runningProcesses.has(run.id);
-    // A recorded PID is judged only in the PID space that recorded it: a dead
-    // local PID never proves that a process on another host, in another
-    // namespace, or in a sandbox ("remote") is gone. Rows saved before the
-    // space was recorded keep the previous local proof for one release, and
-    // only on a single-host server: an ephemeral server cannot assume the
-    // row was written here. Its operator path is the run's Stop control.
-    const legacyHostFallback = run.processHostHash == null && !ephemeralServerEnabled();
-    const processSpaceJudgeable = legacyHostFallback || sameProcessSpace(run.processHostHash);
-    if (!hasLiveExecution && processSpaceJudgeable) {
-      if (typeof pid === "number" || typeof processGroupId === "number") {
-        const processAlive =
-          (typeof pid === "number" && isPidAlive(pid)) ||
-          (typeof processGroupId === "number" &&
-            isProcessGroupAlive(processGroupId));
-        processGone = !processAlive;
-      }
+    if (!issueTerminalStatus && !hasLiveExecution && run.runtimeMode !== "native") {
+      if (!deps.settleLostRunProcess) return { terminalized: false, status: run.status };
+      await deps.settleLostRunProcess({ companyId: run.companyId, runId: run.id,
+        onDeferredDeadline: options?.onDeferredDeadline });
+      const [current] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id)));
+      const status = current?.status ?? run.status;
+      return { terminalized: status !== run.status && TERMINAL_HEARTBEAT_RUN_STATUSES.has(status), status };
+    }
+    if (!hasLiveExecution) {
+      const proof = await proveRunProcessGone(run, "orphaned_running_run");
+      processGone = proof?.verdict === "gone";
+      legacyHostFallback = proof?.legacyHostFallback === true;
     }
 
     // Neither authority applies. The run is still live, so leave it alone.

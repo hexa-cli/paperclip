@@ -1840,12 +1840,16 @@ On startup and on the periodic recovery loop, Paperclip performs the following r
 4. scan silent active runs only for source-aware terminal folding and legacy cleanup; API reads classify ordinary output silence for the board UI
 
 The orphan reap normally waits until a `running` run has been unchanged for five
-minutes. A legacy run whose controller lease belongs to an earlier server boot
-and has expired, which was still preparing (before adapter dispatch), and which
-has no recorded process is recovered when that lease expires instead. The
-expired lease proves that the earlier owner is gone, and no provider work
-started. A live lease, a lease of the current boot, a dispatched adapter, or a
-recorded process keeps the five-minute guard.
+minutes. A recorded legacy child is judged through the shared process-owner
+proof used by the heartbeat reaper, orphan sweep, and hot-restart adoption. A
+proven-gone child is handed to the heartbeat reaper at once and follows its
+`failed/process_lost` retry policy. A live or unprovable child stays held; age
+does not release it. A legacy run whose controller lease belongs to an earlier
+server boot and has expired, which was still preparing (before adapter
+dispatch), and which has no recorded process is recovered when that lease
+expires instead. The expired lease proves that the earlier owner is gone, and
+no provider work started. A live lease, a lease of the current boot, or a
+dispatched adapter without process metadata keeps the five-minute guard.
 
 A native run can accept its result and then lose its server to a hard kill
 before finalization. Its result stays leased to the controller of the earlier
